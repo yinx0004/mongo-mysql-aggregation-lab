@@ -1,0 +1,103 @@
+# MySQL vs MongoDB aggregation lab. Local use only: no authentication, no
+# host ports. Each database container gets a CPU limit so that a heavy
+# aggregation visibly competes with other work on the same node.
+#
+# mongo:8.0.4 is pinned on purpose: later 8.0 images (e.g. 8.0.32) refuse to
+# start on Linux kernels >= 6.19 (SERVER-121912), which includes OrbStack.
+name: agglab
+
+x-mongo: &mongo
+  image: mongo:8.0.4
+  environment: { GLIBC_TUNABLES: glibc.pthread.rseq=0 }
+  cpus: 1.0
+  mem_limit: 1g
+  stop_grace_period: 20s
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 2s
+    retries: 60
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: agglab-mysql
+    hostname: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: lab
+    command: ["--cte-max-recursion-depth=10000000", "--innodb-buffer-pool-size=512M"]
+    cpus: 2.0
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plab", "--silent"]
+      interval: 2s
+      retries: 90
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts:/lab/scripts:ro
+
+  mongo1:
+    <<: *mongo
+    container_name: agglab-mongo1
+    hostname: mongo1
+    command: ["--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.5"]
+    volumes: ["mongo1-data:/data/db", "./scripts:/lab/scripts:ro"]
+  mongo2:
+    <<: *mongo
+    container_name: agglab-mongo2
+    hostname: mongo2
+    command: ["--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.5"]
+    volumes: ["mongo2-data:/data/db", "./scripts:/lab/scripts:ro"]
+  mongo3:
+    <<: *mongo
+    container_name: agglab-mongo3
+    hostname: mongo3
+    command: ["--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.5"]
+    volumes: ["mongo3-data:/data/db", "./scripts:/lab/scripts:ro"]
+
+  # Client box: mongosh plus the mysql client.
+  client:
+    build: ./client
+    image: agglab-client
+    container_name: agglab-client
+    hostname: client
+    volumes: ["./scripts:/lab/scripts:ro", "./scenarios:/lab/scenarios:ro"]
+
+  # Optional sharded cluster: docker compose --profile sharded up -d
+  cfg:
+    <<: *mongo
+    profiles: ["sharded"]
+    container_name: agglab-cfg
+    hostname: cfg
+    command: ["--configsvr", "--replSet", "cfg", "--bind_ip_all", "--port", "27017", "--wiredTigerCacheSizeGB", "0.25"]
+    volumes: ["cfg-data:/data/db"]
+  shard1:
+    <<: *mongo
+    profiles: ["sharded"]
+    container_name: agglab-shard1
+    hostname: shard1
+    command: ["--shardsvr", "--replSet", "sh1", "--bind_ip_all", "--port", "27017", "--wiredTigerCacheSizeGB", "0.25"]
+    volumes: ["shard1-data:/data/db"]
+  shard2:
+    <<: *mongo
+    profiles: ["sharded"]
+    container_name: agglab-shard2
+    hostname: shard2
+    command: ["--shardsvr", "--replSet", "sh2", "--bind_ip_all", "--port", "27017", "--wiredTigerCacheSizeGB", "0.25"]
+    volumes: ["shard2-data:/data/db"]
+  mongos:
+    <<: *mongo
+    profiles: ["sharded"]
+    container_name: agglab-mongos
+    hostname: mongos
+    entrypoint: ["mongos"]
+    command: ["--configdb", "cfg/cfg:27017", "--bind_ip_all", "--port", "27017"]
+    volumes: ["./scripts:/lab/scripts:ro"]
+
+volumes:
+  mysql-data:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+  cfg-data:
+  shard1-data:
+  shard2-data:
